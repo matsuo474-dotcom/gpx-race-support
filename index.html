@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>GPXレースサポート</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    background: #0f1f1a; color: #eef5f1; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 12px; background: #143129; display: flex; align-items: center;
+    gap: 10px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; font-weight: 700; letter-spacing: .02em; }
+  header .sub { font-size: 11px; color: #9fc4b2; width: 100%; }
+  .btn {
+    display: inline-block; background: #ff8c42; color: #1a1208; border: none;
+    padding: 9px 14px; border-radius: 999px; font-size: 14px; font-weight: 700;
+    cursor: pointer; text-decoration: none;
+  }
+  .btn.secondary { background: #24503f; color: #d9efe3; }
+  .btn.on { background: #ffd23f; color: #1a1208; }
+  #fileName { font-size: 12px; color: #cfe6da; word-break: break-all; }
+  #stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+    padding: 8px; background: #0f1f1a;
+  }
+  .stat { background: #1a352a; border-radius: 10px; padding: 7px 9px; }
+  .stat .label { font-size: 10px; color: #9fc4b2; }
+  .stat .value { font-size: 17px; font-weight: 700; margin-top: 1px; }
+  .stat .value small { font-size: 11px; font-weight: 400; color: #9fc4b2; }
+  #map { flex: 1 1 auto; min-height: 240px; background: #dfe8e2; }
+  #chartWrap { background: #12291f; padding: 8px 8px 4px; }
+  #chartTitle { font-size: 11px; color: #9fc4b2; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  #chart { width: 100%; height: 170px; display: block; touch-action: manipulation; }
+  #controls { display: flex; gap: 8px; padding: 8px; background: #0f1f1a; flex-wrap: wrap; }
+  #msg { padding: 0 12px 8px; font-size: 12px; color: #ffd23f; min-height: 16px; }
+  footer { padding: 6px 12px 12px; font-size: 11px; color: #7fa893; line-height: 1.6; }
+  .pos-dot {
+    width: 18px; height: 18px; border-radius: 50%; background: #1e90ff;
+    border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,144,255,.5);
+  }
+  .wpt-label {
+    background: rgba(20,49,41,.92); color: #fff; border: none; border-radius: 6px;
+    font-size: 11px; padding: 2px 6px; box-shadow: none;
+  }
+  .wpt-label::before { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏃 GPXレースサポート</h1>
+  <label class="btn" for="gpxFile">GPXを読み込む</label>
+  <button class="btn secondary" id="sampleBtn" type="button">サンプルで試す</button>
+  <input type="file" id="gpxFile" accept=".gpx,application/gpx+xml" style="display:none">
+  <span id="fileName">GPXファイルを選んでください</span>
+  <div class="sub">コース表示・現在地・高低図。位置情報はこの端末の中だけで処理され、外部に送信されません。</div>
+</header>
+
+<div id="stats">
+  <div class="stat"><div class="label">コース全長</div><div class="value" id="stTotal">–</div></div>
+  <div class="stat"><div class="label">現在地点</div><div class="value" id="stNow">–</div></div>
+  <div class="stat"><div class="label">残り</div><div class="value" id="stRemain">–</div></div>
+  <div class="stat"><div class="label">現在標高</div><div class="value" id="stEle">–</div></div>
+  <div class="stat"><div class="label">次の目印まで</div><div class="value" id="stNext">–</div></div>
+  <div class="stat"><div class="label">GPS精度</div><div class="value" id="stAcc">–</div></div>
+</div>
+
+<div id="map"></div>
+
+<div id="chartWrap">
+  <div id="chartTitle"><span>高低図（タップでその地点を地図に表示）</span><span id="chartInfo"></span></div>
+  <canvas id="chart"></canvas>
+</div>
+
+<div id="controls">
+  <button class="btn" id="locateBtn" type="button">現在地を表示</button>
+  <button class="btn secondary" id="followBtn" type="button">追従：OFF</button>
+  <button class="btn secondary" id="fitBtn" type="button">コース全体</button>
+</div>
+<div id="msg"></div>
+
+<footer>
+  使い方：レース前にGPXを読み込んでおき、走りながら「現在地を表示」を押すと、コース上の現在地点・残り距離・高低図上の位置が分かります。画面を閉じると位置の追跡は止まります。長時間の使用は電池を消費します。
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function () {
+  "use strict";
+  var R = 6371000, RAD = Math.PI / 180;
+  var pts = [];        // {lat, lon, ele, dist} dist=累積距離(m)
+  var wpts = [];       // {lat, lon, name, dist}
+  var totalDist = 0;
+  var posIndex = -1;   // 現在地に最も近いコース点のindex
+  var follow = false;
+  var watching = false;
+
+  var map = L.map("map", { zoomControl: true }).setView([35.5, 138.7], 11);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18, attribution: "© OpenStreetMap contributors"
+  }).addTo(map);
+
+  var courseLine = null, startMarker = null, goalMarker = null;
+  var wptLayer = L.layerGroup().addTo(map);
+  var posMarker = null, accCircle = null, peekMarker = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = function (t) { $("msg").textContent = t || ""; };
+  var fmtKm = function (m) { return (m / 1000).toFixed(1); };
+
+  function hav(a, b) {
+    var dLat = (b.lat - a.lat) * RAD, dLon = (b.lon - a.lon) * RAD;
+    var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  // ---------- GPX読み込み ----------
+  function loadGpxText(text, name) {
+    var doc = new DOMParser().parseFromString(text, "application/xml");
+    if (doc.getElementsByTagName("parsererror").length) {
+      msg("GPXを読み取れませんでした。ファイルを確認してください。");
+      return;
+    }
+    var nodes = doc.getElementsByTagName("trkpt");
+    if (nodes.length < 2) nodes = doc.getElementsByTagName("rtept");
+    if (nodes.length < 2) { msg("コースの点が見つかりませんでした。"); return; }
+
+    pts = [];
+    var prev = null, acc = 0, lastEle = null;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var p = {
+        lat: parseFloat(n.getAttribute("lat")),
+        lon: parseFloat(n.getAttribute("lon")),
+        ele: null
+      };
+      var eleEl = n.getElementsByTagName("ele")[0];
+      if (eleEl) { p.ele = parseFloat(eleEl.textContent); lastEle = p.ele; }
+      else if (lastEle !== null) { p.ele = lastEle; }
+      if (prev) acc += hav(prev, p);
+      p.dist = acc;
+      pts.push(p); prev = p;
+    }
+    totalDist = acc;
+
+    wpts = [];
+    var wnodes = doc.getElementsByTagName("wpt");
+    for (var j = 0; j < wnodes.length; j++) {
+      var w = wnodes[j];
+      var wp = {
+        lat: parseFloat(w.getAttribute("lat")),
+        lon: parseFloat(w.getAttribute("lon")),
+        name: ""
+      };
+      var nm = w.getElementsByTagName("name")[0];
+      if (nm) wp.name = nm.textContent;
+      wp.dist = nearestDist(wp);
+      wpts.push(wp);
+    }
+    wpts.sort(function (a, b) { return a.dist - b.dist; });
+
+    posIndex = -1;
+    drawCourse();
+    $("fileName").textContent = name;
+    $("stTotal").innerHTML = fmtKm(totalDist) + " <small>km</small>";
+    $("stNow").textContent = "–"; $("stRemain").textContent = "–";
+    $("stEle").textContent = "–"; $("stNext").textContent = "–";
+    msg("コースを読み込みました。「現在地を表示」を押すとGPSで現在地を出します。");
+  }
+
+  function nearestIndex(loc) {
+    var best = -1, bestD = Infinity;
+    for (var i = 0; i < pts.length; i++) {
+      var d = hav(loc, pts[i]);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+  function nearestDist(loc) {
+    var i = nearestIndex(loc);
+    return i >= 0 ? pts[i].dist : 0;
+  }
+
+  function drawCourse() {
+    if (courseLine) { map.removeLayer(courseLine); }
+    if (startMarker) { map.removeLayer(startMarker); }
+    if (goalMarker) { map.removeLayer(goalMarker); }
+    wptLayer.clearLayers();
+    var latlngs = pts.map(function (p) { return [p.lat, p.lon]; });
+    courseLine = L.polyline(latlngs, { color: "#ff5722", weight: 4, opacity: 0.9 }).addTo(map);
+    startMarker = L.marker(latlngs[0]).addTo(map).bindTooltip("スタート", { permanent: true, className: "wpt-label" });
+    goalMarker = L.marker(latlngs[latlngs.length - 1]).addTo(map).bindTooltip("ゴール", { permanent: true, className: "wpt-label" });
+    wpts.forEach(function (w) {
+      L.marker([w.lat, w.lon]).addTo(wptLayer)
+        .bindTooltip((w.name || "目印") + "（" + fmtKm(w.dist) + "km）", { permanent: true, className: "wpt-label" });
+    });
+    map.fitBounds(courseLine.getBounds(), { padding: [20, 20] });
+    drawChart();
+  }
+
+  // ---------- 高低図 ----------
+  function chartGeom() {
+    var c = $("chart");
+    var w = c.clientWidth, h = c.clientHeight;
+    return { w: w, h: h, padL: 6, padR: 6, padT: 14, padB: 16 };
+  }
+  function eleRange() {
+    var mn = Infinity, mx = -Infinity;
+    pts.forEach(function (p) { if (p.ele !== null) { if (p.ele < mn) mn = p.ele; if (p.ele > mx) mx = p.ele; } });
+    if (mn === Infinity) { mn = 0; mx = 100; }
+    if (mx - mn < 50) { mx = mn + 50; }
+    return { mn: mn, mx: mx };
+  }
+  function drawChart(peekDist) {
+    var c = $("chart");
+    var dpr = window.devicePixelRatio || 1;
+    var g = chartGeom();
+    if (c.width !== Math.round(g.w * dpr)) { c.width = Math.round(g.w * dpr); c.height = Math.round(g.h * dpr); }
+    var ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, g.w, g.h);
+    if (pts.length < 2) {
+      ctx.fillStyle = "#9fc4b2"; ctx.font = "12px sans-serif";
+      ctx.fillText("GPXを読み込むと高低図が表示されます", 10, 30);
+      return;
+    }
+    var er = eleRange();
+    var iw = g.w - g.padL - g.padR, ih = g.h - g.padT - g.padB;
+    var X = function (d) { return g.padL + (d / totalDist) * iw; };
+    var Y = function (e) { return g.padT + ih - ((e - er.mn) / (er.mx - er.mn)) * ih; };
+
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
+      var x = X(p.dist), y = Y(p.ele === null ? er.mn : p.ele);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#ffb27a"; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.lineTo(X(totalDist), g.padT + ih); ctx.lineTo(X(0), g.padT + ih); ctx.closePath();
+    ctx.fillStyle = "rgba(255,140,66,.25)"; ctx.fill();
+
+    // 目印（ウェイポイント）
+    ctx.fillStyle = "#9fc4b2"; ctx.font = "9px sans-serif";
+    wpts.forEach(function (w) {
+      var x = X(w.dist);
+      ctx.fillRect(x - 0.5, g.padT, 1, ih);
+    });
+    // 軸ラベル
+    ctx.fillStyle = "#9fc4b2"; ctx.font = "10px sans-serif";
+    ctx.fillText("0km", g.padL, g.h - 4);
+    var t = fmtKm(totalDist) + "km";
+    ctx.fillText(t, g.w - g.padR - ctx.measureText(t).width, g.h - 4);
+    ctx.fillText(Math.round(er.mx) + "m", g.padL, 10);
+    ctx.fillText(Math.round(er.mn) + "m", g.w - g.padR - ctx.measureText(Math.round(er.mn) + "m").width, 10);
+
+    // 現在地
+    if (posIndex >= 0) {
+      var p = pts[posIndex];
+      var x = X(p.dist), y = Y(p.ele === null ? er.mn : p.ele);
+      ctx.strokeStyle = "#1e90ff"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, g.padT); ctx.lineTo(x, g.padT + ih); ctx.stroke();
+      ctx.fillStyle = "#1e90ff";
+      ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+    }
+    // タップ地点
+    if (typeof peekDist === "number") {
+      var xp = X(peekDist);
+      ctx.strokeStyle = "#ffd23f"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(xp, g.padT); ctx.lineTo(xp, g.padT + ih); ctx.stroke();
+    }
+  }
+
+  $("chart").addEventListener("click", function (ev) {
+    if (pts.length < 2) return;
+    var rect = $("chart").getBoundingClientRect();
+    var g = chartGeom();
+    var ratio = (ev.clientX - rect.left - g.padL) / (g.w - g.padL - g.padR);
+    if (ratio < 0) ratio = 0; if (ratio > 1) ratio = 1;
+    var d = ratio * totalDist;
+    var i = nearestIndexByDist(d);
+    var p = pts[i];
+    if (peekMarker) map.removeLayer(peekMarker);
+    peekMarker = L.circleMarker([p.lat, p.lon], { radius: 7, color: "#ffd23f", weight: 3, fillColor: "#ffd23f", fillOpacity: 0.5 }).addTo(map);
+    map.panTo([p.lat, p.lon]);
+    $("chartInfo").textContent = fmtKm(p.dist) + "km地点・標高" + (p.ele !== null ? Math.round(p.ele) + "m" : "–");
+    drawChart(d);
+  });
+  function nearestIndexByDist(d) {
+    var lo = 0, hi = pts.length - 1;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (pts[mid].dist < d) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && Math.abs(pts[lo - 1].dist - d) < Math.abs(pts[lo].dist - d)) return lo - 1;
+    return lo;
+  }
+
+  // ---------- GPS ----------
+  function onPos(pos) {
+    var loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    var ll = [loc.lat, loc.lon];
+    if (!posMarker) {
+      posMarker = L.marker(ll, { icon: L.divIcon({ className: "", html: '<div class="pos-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) }).addTo(map);
+      accCircle = L.circle(ll, { radius: pos.coords.accuracy || 0, color: "#1e90ff", weight: 1, fillOpacity: 0.12 }).addTo(map);
+    } else {
+      posMarker.setLatLng(ll);
+      accCircle.setLatLng(ll);
+      accCircle.setRadius(pos.coords.accuracy || 0);
+    }
+    $("stAcc").innerHTML = "±" + Math.round(pos.coords.accuracy || 0) + " <small>m</small>";
+    if (follow) map.panTo(ll);
+
+    if (pts.length >= 2) {
+      posIndex = nearestIndex(loc);
+      var p = pts[posIndex];
+      var off = hav(loc, p);
+      $("stNow").innerHTML = fmtKm(p.dist) + " <small>km地点</small>";
+      $("stRemain").innerHTML = fmtKm(totalDist - p.dist) + " <small>km</small>";
+      $("stEle").innerHTML = (pos.coords.altitude !== null && pos.coords.altitude !== undefined)
+        ? Math.round(pos.coords.altitude) + " <small>m</small>"
+        : (p.ele !== null ? Math.round(p.ele) + " <small>m</small>" : "–");
+      var next = null;
+      for (var i = 0; i < wpts.length; i++) { if (wpts[i].dist > p.dist + 30) { next = wpts[i]; break; } }
+      if (next) $("stNext").innerHTML = fmtKm(next.dist - p.dist) + " <small>km（" + (next.name || "目印") + "）</small>";
+      else if (wpts.length) $("stNext").textContent = "ゴールまで " + fmtKm(totalDist - p.dist) + "km";
+      else $("stNext").textContent = "–";
+      msg(off > 200 ? "コースから約" + Math.round(off) + "m離れています。最寄りのコース地点を表示しています。" : "");
+      drawChart();
+    }
+  }
+  function onPosErr(err) {
+    msg("位置情報を取得できませんでした（" + err.message + "）。端末の位置情報許可を確認してください。");
+  }
+  $("locateBtn").addEventListener("click", function () {
+    if (!("geolocation" in navigator)) { msg("このブラウザは位置情報に対応していません。"); return; }
+    if (watching) return;
+    watching = true;
+    $("locateBtn").textContent = "現在地を表示中…";
+    navigator.geolocation.watchPosition(onPos, onPosErr, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  });
+  $("followBtn").addEventListener("click", function () {
+    follow = !follow;
+    this.textContent = "追従：" + (follow ? "ON" : "OFF");
+    this.classList.toggle("on", follow);
+    if (follow && posMarker) map.panTo(posMarker.getLatLng());
+  });
+  $("fitBtn").addEventListener("click", function () {
+    if (courseLine) map.fitBounds(courseLine.getBounds(), { padding: [20, 20] });
+  });
+
+  // ---------- 入力 ----------
+  $("gpxFile").addEventListener("change", function (ev) {
+    var f = ev.target.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () { loadGpxText(String(reader.result), f.name); };
+    reader.onerror = function () { msg("ファイルの読み込みに失敗しました。"); };
+    reader.readAsText(f);
+  });
+
+  $("sampleBtn").addEventListener("click", function () {
+    // テスト用サンプル：河口湖の周回コース（約20km）
+    var cx = 35.5178, cy = 138.7469, N = 72;
+    var out = ['<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1" creator="moko-sample" xmlns="http://www.topografix.com/GPX/1/1">'];
+    out.push('<wpt lat="' + cx + '" lon="' + cy + '"><name>スタート 河口湖</name></wpt>');
+    out.push('<wpt lat="' + (cx + 0.028) + '" lon="' + (cy - 0.045) + '"><name>エイド1</name></wpt>');
+    out.push('<wpt lat="' + (cx - 0.032) + '" lon="' + (cy + 0.038) + '"><name>エイド2</name></wpt>');
+    out.push('<trk><name>サンプルコース 河口湖周回</name><trkseg>');
+    for (var i = 0; i <= N; i++) {
+      var t = (i / N) * Math.PI * 2;
+      var lat = cx + Math.sin(t) * 0.034;
+      var lon = cy + Math.cos(t) * 0.047;
+      var ele = 831 + Math.round(55 * (0.5 + 0.5 * Math.sin(t * 2 + 1))) + Math.round(18 * Math.sin(t * 5));
+      out.push('<trkpt lat="' + lat.toFixed(6) + '" lon="' + lon.toFixed(6) + '"><ele>' + ele + '</ele></trkpt>');
+    }
+    out.push('</trkseg></trk></gpx>');
+    loadGpxText(out.join("\n"), "サンプル（河口湖周回・テスト用）");
+  });
+
+  window.addEventListener("resize", function () { drawChart(); });
+  drawChart();
+})();
+</script>
+</body>
+</html>
