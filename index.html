@@ -272,12 +272,6 @@
     });
   }
 
-  $("aidFilterBtn").addEventListener("click", function () {
-    filterOnly = !filterOnly;
-    try { localStorage.setItem(FILTER_KEY, filterOnly ? "1" : "0"); } catch (e) {}
-    renderAids();
-  });
-
   var map = L.map("map", { zoomControl: true }).setView([35.5, 138.7], 11);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18, attribution: "© OpenStreetMap contributors"
@@ -536,6 +530,12 @@
   });
 
   // ---------- 入力 ----------
+  $("aidFilterBtn").addEventListener("click", function () {
+    filterOnly = !filterOnly;
+    try { localStorage.setItem(FILTER_KEY, filterOnly ? "1" : "0"); } catch (e) {}
+    renderAids();
+  });
+
   $("gpxFile").addEventListener("change", function (ev) {
     var f = ev.target.files[0];
     if (!f) return;
