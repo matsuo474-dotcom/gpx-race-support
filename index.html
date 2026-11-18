@@ -50,6 +50,22 @@
     font-size: 11px; padding: 2px 6px; box-shadow: none;
   }
   .wpt-label::before { display: none; }
+  #aidWrap { padding: 8px; background: #0f1f1a; }
+  #aidHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  #aidTitle { font-size: 14px; font-weight: 700; }
+  #aidFilterBtn { font-size: 12px; padding: 6px 10px; }
+  #aidNote { font-size: 11px; color: #ffd23f; margin-bottom: 6px; }
+  #aidHint { font-size: 11px; color: #7fa893; margin-top: 6px; line-height: 1.5; }
+  .aid-card { background: #1a352a; border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; border: 2px solid transparent; }
+  .aid-card.next { border-color: #ffd23f; }
+  .aid-name { font-size: 14px; font-weight: 700; }
+  .aid-name .next-badge { background: #ffd23f; color: #1a1208; font-size: 10px; border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: 2px; }
+  .aid-meta { font-size: 11px; color: #9fc4b2; margin: 2px 0 6px; }
+  .aid-group-label { font-size: 11px; color: #9fc4b2; margin: 6px 0 4px; }
+  .aid-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .aid-chip { background: #24503f; color: #d9efe3; border: 2px solid #3a7a5f; padding: 5px 11px; border-radius: 999px; font-size: 13px; cursor: pointer; }
+  .aid-chip.sel { background: #ff8c42; border-color: #ff8c42; color: #1a1208; font-weight: 700; }
+  .aid-none { font-size: 12px; color: #9fc4b2; }
 </style>
 </head>
 <body>
@@ -85,6 +101,16 @@
 </div>
 <div id="msg"></div>
 
+<div id="aidWrap" style="display:none">
+  <div id="aidHead">
+    <span id="aidTitle">エイド</span>
+    <button class="btn secondary" id="aidFilterBtn" type="button">必要なものだけ表示：OFF</button>
+  </div>
+  <div id="aidNote"></div>
+  <div id="aidList"></div>
+  <div id="aidHint">各エイドで「自分が摂るもの」をタップして選んでください。選択はこの端末に保存されるので、使う人ごとに自分の計画を持てます。</div>
+</div>
+
 <footer>
   使い方：レース前にGPXを読み込んでおき、走りながら「現在地を表示」を押すと、コース上の現在地点・残り距離・高低図上の位置が分かります。画面を閉じると位置の追跡は止まります。長時間の使用は電池を消費します。
 </footer>
@@ -100,6 +126,157 @@
   var posIndex = -1;   // 現在地に最も近いコース点のindex
   var follow = false;
   var watching = false;
+
+  // ---------- エイド ----------
+  var courseKey = null;  // コースの識別子（提供品情報と摂取計画のひも付け用）
+  var aids = [];         // {name, dist, drinks, foods} drinks/foodsがnullなら提供品情報なし
+  var aidEls = [];       // 描画済みカードの参照 {aid, card, eta, badge}
+
+  // エイドの提供品データベース（コースキー → エイド名 → 提供品）。
+  // 公式リストが公開されたら、公式コースのキーでここに追加する。
+  var AID_INFO = {
+    "sample": {
+      "エイド1": { drinks: ["水", "スポーツドリンク", "コーラ"], foods: ["バナナ", "おにぎり", "塩タブレット"] },
+      "エイド2": { drinks: ["水", "スポーツドリンク", "味噌汁"], foods: ["うどん", "オレンジ", "チョコレート", "塩タブレット"] }
+    }
+  };
+
+  // 摂取計画（使う人ごと・端末ごと）：{コースキー: {エイド名: [品目,...]}}
+  var PLAN_KEY = "gpxRaceSupport.aidPlan.v1";
+  var FILTER_KEY = "gpxRaceSupport.aidFilterOnly";
+  var plan = {};
+  try { plan = JSON.parse(localStorage.getItem(PLAN_KEY) || "{}") || {}; } catch (e) { plan = {}; }
+  var filterOnly = false;
+  try { filterOnly = localStorage.getItem(FILTER_KEY) === "1"; } catch (e) { filterOnly = false; }
+
+  function planFor(aidName) {
+    var c = plan[courseKey] || {};
+    return c[aidName] || [];
+  }
+  function isSel(aidName, item) { return planFor(aidName).indexOf(item) >= 0; }
+  function toggleSel(aidName, item) {
+    if (!plan[courseKey]) plan[courseKey] = {};
+    var arr = plan[courseKey][aidName] || [];
+    var i = arr.indexOf(item);
+    if (i >= 0) arr.splice(i, 1); else arr.push(item);
+    plan[courseKey][aidName] = arr;
+    try { localStorage.setItem(PLAN_KEY, JSON.stringify(plan)); } catch (e) {}
+  }
+
+  function buildAids() {
+    aids = [];
+    var info = (courseKey && AID_INFO[courseKey]) || {};
+    wpts.forEach(function (w) {
+      if (w.name && (w.name.indexOf("エイド") >= 0 || /aid/i.test(w.name))) {
+        var inf = info[w.name] || null;
+        aids.push({
+          name: w.name, dist: w.dist,
+          drinks: inf ? inf.drinks : null,
+          foods: inf ? inf.foods : null
+        });
+      }
+    });
+  }
+
+  function renderAids() {
+    var wrap = $("aidWrap");
+    aidEls = [];
+    if (!aids.length) { wrap.style.display = "none"; return; }
+    wrap.style.display = "";
+    var fb = $("aidFilterBtn");
+    fb.textContent = "必要なものだけ表示：" + (filterOnly ? "ON" : "OFF");
+    fb.classList.toggle("on", filterOnly);
+    $("aidNote").textContent = (courseKey === "sample")
+      ? "※提供品はサンプルデータです（公式リスト公開後に差し替えます）" : "";
+    var list = $("aidList");
+    list.innerHTML = "";
+    aids.forEach(function (aid) {
+      var card = document.createElement("div");
+      card.className = "aid-card";
+      var nameEl = document.createElement("div");
+      nameEl.className = "aid-name";
+      nameEl.textContent = aid.name;
+      var badge = document.createElement("span");
+      badge.className = "next-badge";
+      badge.textContent = "次のエイド";
+      badge.style.display = "none";
+      nameEl.appendChild(badge);
+      card.appendChild(nameEl);
+      var meta = document.createElement("div");
+      meta.className = "aid-meta";
+      var eta = document.createElement("span");
+      meta.textContent = fmtKm(aid.dist) + "km地点　";
+      meta.appendChild(eta);
+      card.appendChild(meta);
+
+      if (aid.drinks === null && aid.foods === null) {
+        var none = document.createElement("div");
+        none.className = "aid-none";
+        none.textContent = "提供品の情報はまだありません（公式リスト待ち）";
+        card.appendChild(none);
+      } else {
+        appendAidGroup(card, aid, "飲み物", aid.drinks || []);
+        appendAidGroup(card, aid, "給食", aid.foods || []);
+      }
+      list.appendChild(card);
+      aidEls.push({ aid: aid, card: card, eta: eta, badge: badge });
+    });
+    updateAidDistances();
+  }
+
+  function appendAidGroup(card, aid, label, items) {
+    var shown = filterOnly ? items.filter(function (it) { return isSel(aid.name, it); }) : items;
+    var lab = document.createElement("div");
+    lab.className = "aid-group-label";
+    lab.textContent = label;
+    card.appendChild(lab);
+    if (!shown.length) {
+      var none = document.createElement("div");
+      none.className = "aid-none";
+      none.textContent = filterOnly ? "（選択なし）" : "（なし）";
+      card.appendChild(none);
+      return;
+    }
+    var box = document.createElement("div");
+    box.className = "aid-chips";
+    shown.forEach(function (item) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "aid-chip" + (isSel(aid.name, item) ? " sel" : "");
+      chip.textContent = item;
+      chip.addEventListener("click", function () {
+        toggleSel(aid.name, item);
+        renderAids();
+      });
+      box.appendChild(chip);
+    });
+    card.appendChild(box);
+  }
+
+  function updateAidDistances() {
+    if (!aidEls.length) return;
+    var cur = (posIndex >= 0 && pts.length >= 2) ? pts[posIndex].dist : null;
+    var nextFound = false;
+    aidEls.forEach(function (rec) {
+      var isNext = false;
+      if (cur === null) {
+        rec.eta.textContent = "";
+      } else if (rec.aid.dist > cur + 30) {
+        rec.eta.textContent = "あと " + fmtKm(rec.aid.dist - cur) + "km";
+        if (!nextFound) { isNext = true; nextFound = true; }
+      } else {
+        rec.eta.textContent = "通過済み";
+      }
+      rec.card.classList.toggle("next", isNext);
+      rec.badge.style.display = isNext ? "" : "none";
+    });
+  }
+
+  $("aidFilterBtn").addEventListener("click", function () {
+    filterOnly = !filterOnly;
+    try { localStorage.setItem(FILTER_KEY, filterOnly ? "1" : "0"); } catch (e) {}
+    renderAids();
+  });
 
   var map = L.map("map", { zoomControl: true }).setView([35.5, 138.7], 11);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -123,7 +300,8 @@
   }
 
   // ---------- GPX読み込み ----------
-  function loadGpxText(text, name) {
+  function loadGpxText(text, name, key) {
+    courseKey = key || null;
     var doc = new DOMParser().parseFromString(text, "application/xml");
     if (doc.getElementsByTagName("parsererror").length) {
       msg("GPXを読み取れませんでした。ファイルを確認してください。");
@@ -168,7 +346,9 @@
     wpts.sort(function (a, b) { return a.dist - b.dist; });
 
     posIndex = -1;
+    buildAids();
     drawCourse();
+    renderAids();
     $("fileName").textContent = name;
     $("stTotal").innerHTML = fmtKm(totalDist) + " <small>km</small>";
     $("stNow").textContent = "–"; $("stRemain").textContent = "–";
@@ -331,6 +511,7 @@
       else if (wpts.length) $("stNext").textContent = "ゴールまで " + fmtKm(totalDist - p.dist) + "km";
       else $("stNext").textContent = "–";
       msg(off > 200 ? "コースから約" + Math.round(off) + "m離れています。最寄りのコース地点を表示しています。" : "");
+      updateAidDistances();
       drawChart();
     }
   }
@@ -359,7 +540,7 @@
     var f = ev.target.files[0];
     if (!f) return;
     var reader = new FileReader();
-    reader.onload = function () { loadGpxText(String(reader.result), f.name); };
+    reader.onload = function () { loadGpxText(String(reader.result), f.name, "gpx:" + f.name); };
     reader.onerror = function () { msg("ファイルの読み込みに失敗しました。"); };
     reader.readAsText(f);
   });
@@ -381,7 +562,7 @@
       out.push('<trkpt lat="' + lat.toFixed(6) + '" lon="' + lon.toFixed(6) + '"><ele>' + ele + '</ele></trkpt>');
     }
     out.push('</trkseg></trk></gpx>');
-    loadGpxText(out.join("\n"), "サンプル（河口湖周回・テスト用）");
+    loadGpxText(out.join("\n"), "サンプル（河口湖周回・テスト用）", "sample");
   });
 
   window.addEventListener("resize", function () { drawChart(); });
