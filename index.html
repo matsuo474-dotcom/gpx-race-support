@@ -37,7 +37,7 @@
   #map { flex: 1 1 auto; min-height: 240px; background: #dfe8e2; }
   #chartWrap { background: #12291f; padding: 8px 8px 4px; }
   #chartTitle { font-size: 11px; color: #9fc4b2; margin-bottom: 4px; display: flex; justify-content: space-between; }
-  #chart { width: 100%; height: 170px; display: block; touch-action: manipulation; }
+  #chart { width: 100%; height: 300px; display: block; touch-action: manipulation; }
   #controls { display: flex; gap: 8px; padding: 8px; background: #0f1f1a; flex-wrap: wrap; }
   #msg { padding: 0 12px 8px; font-size: 12px; color: #ffd23f; min-height: 16px; }
   footer { padding: 6px 12px 12px; font-size: 11px; color: #7fa893; line-height: 1.6; }
@@ -50,6 +50,15 @@
     font-size: 11px; padding: 2px 6px; box-shadow: none;
   }
   .wpt-label::before { display: none; }
+  #tabBar { display: flex; gap: 6px; padding: 8px; background: #0f1f1a; }
+  .tab-btn {
+    flex: 1; background: #24503f; color: #d9efe3; border: none; padding: 9px 4px;
+    border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  .tab-btn.on { background: #ffd23f; color: #1a1208; }
+  .tabpanel { display: none; }
+  .tabpanel.active { display: block; }
+  #panelMap.active { display: flex; flex-direction: column; flex: 1 1 auto; }
   #aidWrap { padding: 8px; background: #0f1f1a; }
   #aidHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   #aidTitle { font-size: 14px; font-weight: 700; }
@@ -78,6 +87,14 @@
   <div class="sub">コース表示・現在地・高低図。位置情報はこの端末の中だけで処理され、外部に送信されません。</div>
 </header>
 
+<div id="tabBar">
+  <button class="tab-btn on" id="tabPos" type="button">現在地</button>
+  <button class="tab-btn" id="tabMap" type="button">地図</button>
+  <button class="tab-btn" id="tabChart" type="button">高低図</button>
+  <button class="tab-btn" id="tabAid" type="button">エイド</button>
+</div>
+
+<div class="tabpanel active" id="panelPos">
 <div id="stats">
   <div class="stat"><div class="label">コース全長</div><div class="value" id="stTotal">–</div></div>
   <div class="stat"><div class="label">現在地点</div><div class="value" id="stNow">–</div></div>
@@ -87,27 +104,32 @@
   <div class="stat"><div class="label">GPS精度</div><div class="value" id="stAcc">–</div></div>
 </div>
 
-<div id="map"></div>
-
-<div id="chartWrap">
-  <div id="chartTitle"><span>高低図（タップでその地点を地図に表示）</span><span id="chartInfo"></span></div>
-  <canvas id="chart"></canvas>
-</div>
-
 <div id="controls">
   <button class="btn" id="locateBtn" type="button">現在地を表示</button>
   <button class="btn secondary" id="followBtn" type="button">追従：OFF</button>
   <button class="btn secondary" id="fitBtn" type="button">コース全体</button>
 </div>
 <div id="msg"></div>
+</div><!-- /panelPos -->
 
-<div id="aidWrap" style="display:none">
+<div class="tabpanel" id="panelMap">
+<div id="map"></div>
+</div>
+
+<div class="tabpanel" id="panelChart">
+<div id="chartWrap">
+  <div id="chartTitle"><span>高低図（タップでその地点を地図に表示）</span><span id="chartInfo"></span></div>
+  <canvas id="chart"></canvas>
+</div>
+</div>
+
+<div id="aidWrap" class="tabpanel">
   <div id="aidHead">
     <span id="aidTitle">エイド</span>
     <button class="btn secondary" id="aidFilterBtn" type="button">必要なものだけ表示：OFF</button>
   </div>
   <div id="aidNote"></div>
-  <div id="aidList"></div>
+  <div id="aidList"><div class="aid-none">コースを読み込むと、エイドの一覧がここに表示されます。</div></div>
   <div id="aidHint">各エイドで「自分が摂るもの」をタップして選んでください。選択はこの端末に保存されるので、使う人ごとに自分の計画を持てます。</div>
 </div>
 
@@ -179,10 +201,12 @@
   }
 
   function renderAids() {
-    var wrap = $("aidWrap");
     aidEls = [];
-    if (!aids.length) { wrap.style.display = "none"; return; }
-    wrap.style.display = "";
+    if (!aids.length) {
+      $("aidNote").textContent = "";
+      $("aidList").innerHTML = '<div class="aid-none">コースを読み込むと、エイドの一覧がここに表示されます。</div>';
+      return;
+    }
     var fb = $("aidFilterBtn");
     fb.textContent = "必要なものだけ表示：" + (filterOnly ? "ON" : "OFF");
     fb.classList.toggle("on", filterOnly);
@@ -347,6 +371,7 @@
     $("stTotal").innerHTML = fmtKm(totalDist) + " <small>km</small>";
     $("stNow").textContent = "–"; $("stRemain").textContent = "–";
     $("stEle").textContent = "–"; $("stNext").textContent = "–";
+    showTab("map");
     msg("コースを読み込みました。「現在地を表示」を押すとGPSで現在地を出します。");
   }
 
@@ -529,6 +554,31 @@
     if (courseLine) map.fitBounds(courseLine.getBounds(), { padding: [20, 20] });
   });
 
+  // ---------- タブ切り替え ----------
+  var TAB_NAMES = ["pos", "map", "chart", "aid"];
+  function tabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
+  function showTab(name) {
+    TAB_NAMES.forEach(function (t) {
+      var on = (t === name);
+      $("panel" + tabCap(t)).classList.toggle("active", on);
+      $("tab" + tabCap(t)).classList.toggle("on", on);
+    });
+    if (name === "map") {
+      setTimeout(function () {
+        var wasZero = false;
+        try { wasZero = map.getSize().x === 0; } catch (e) {}
+        map.invalidateSize();
+        if (wasZero && courseLine) map.fitBounds(courseLine.getBounds(), { padding: [20, 20] });
+      }, 30);
+    }
+    if (name === "chart") {
+      setTimeout(function () { drawChart(); }, 30);
+    }
+  }
+  TAB_NAMES.forEach(function (t) {
+    $("tab" + tabCap(t)).addEventListener("click", function () { showTab(t); });
+  });
+
   // ---------- 入力 ----------
   $("aidFilterBtn").addEventListener("click", function () {
     filterOnly = !filterOnly;
@@ -567,6 +617,7 @@
 
   window.addEventListener("resize", function () { drawChart(); });
   drawChart();
+  renderAids();
 })();
 </script>
 </body>
